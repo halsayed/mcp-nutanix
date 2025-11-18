@@ -99,6 +99,33 @@ Create or update `~/.cursor/mcp.json`:
 - `NUTANIX_PASSWORD` - API password (required)
 - `NUTANIX_INSECURE` - Set to "true" for self-signed certificates (optional)
 
+### Running over HTTP (SSE transport)
+
+By default the server continues to speak MCP over stdio, which is ideal for tools such as Claude Desktop.  
+To expose the server over HTTP using Server-Sent Events (SSE), set the transport to `sse` and provide an address to listen on:
+
+```bash
+./mcp-nutanix --transport sse --http-addr :8080 --base-url http://localhost:8080
+```
+
+When running under SSE the server advertises two endpoints:
+
+- `base-url` + optional `base-path` + `sse-endpoint` (defaults to `/sse`) — the streaming endpoint clients subscribe to
+- `base-url` + optional `base-path` + `message-endpoint` (defaults to `/message`) — the HTTP endpoint clients POST MCP JSON-RPC payloads to
+
+You can configure every setting via flags or environment variables:
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--transport` | `MCP_TRANSPORT` | `stdio` | Set to `sse` to enable HTTP transport |
+| `--http-addr` | `MCP_HTTP_ADDR` | `:8080` | Address the HTTP server binds to |
+| `--base-url` | `MCP_BASE_URL` | derived from `http-addr` | Public URL clients should POST to (e.g. `http://localhost:8080`) |
+| `--base-path` | `MCP_BASE_PATH` | empty | Optional path prefix (e.g. `/mcp`) |
+| `--sse-endpoint` | `MCP_SSE_ENDPOINT` | `/sse` | Relative path for the SSE stream |
+| `--message-endpoint` | `MCP_MESSAGE_ENDPOINT` | `/message` | Relative path for the JSON-RPC POST endpoint |
+
+These options make it easy to deploy the server behind a reverse proxy or expose it to remote MCP clients. Remember to keep your Prism credentials secure when exposing the server beyond your localhost.
+
 ### Other MCP Clients
 
 This server follows the standard MCP protocol and should work with any MCP client that supports stdio transport. Refer to your client's documentation for configuration instructions.

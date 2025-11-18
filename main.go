@@ -1,8 +1,11 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 
 	"github.com/thunderboltsid/mcp-nutanix/internal/client"
 	"github.com/thunderboltsid/mcp-nutanix/pkg/prompts"
@@ -26,6 +29,15 @@ type ResourceRegistration struct {
 	ResourceHandler server.ResourceTemplateHandlerFunc
 }
 
+type serverConfig struct {
+	transport       string
+	httpAddr        string
+	baseURL         string
+	basePath        string
+	messageEndpoint string
+	sseEndpoint     string
+}
+
 // initializeFromEnvIfAvailable initializes the Prism client only if environment variables are available
 func initializeFromEnvIfAvailable() {
 	endpoint := os.Getenv("NUTANIX_ENDPOINT")
@@ -40,7 +52,156 @@ func initializeFromEnvIfAvailable() {
 	}
 }
 
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func normalizeEndpoint(value, fallback string) string {
+	if value == "" {
+		value = fallback
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return value
+}
+
+func normalizeBasePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return strings.TrimSuffix(path, "/")
+}
+
+func defaultBaseURL(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "http://localhost:8080"
+	}
+
+	host := "localhost"
+	port := ""
+
+	switch {
+	case strings.HasPrefix(addr, ":"):
+		host = "localhost"
+		port = addr
+	case strings.Contains(addr, ":"):
+		if parsedHost, parsedPort, err := net.SplitHostPort(addr); err == nil {
+			if parsedHost != "" {
+				host = parsedHost
+			}
+			if parsedPort != "" {
+				port = ":" + parsedPort
+			}
+		} else {
+			host = addr
+		}
+	default:
+		host = addr
+	}
+
+	if port == "" {
+		port = ":80"
+	}
+
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+
+	return fmt.Sprintf("http://%s%s", host, port)
+}
+
+func loadServerConfig() serverConfig {
+	cfg := serverConfig{}
+
+	flag.StringVar(
+		&cfg.transport,
+		"transport",
+		envOrDefault("MCP_TRANSPORT", "stdio"),
+		"Transport to use (stdio or sse)",
+	)
+	flag.StringVar(
+		&cfg.httpAddr,
+		"http-addr",
+		envOrDefault("MCP_HTTP_ADDR", ":8080"),
+		"HTTP listen address for SSE transport",
+	)
+	flag.StringVar(
+		&cfg.baseURL,
+		"base-url",
+		os.Getenv("MCP_BASE_URL"),
+		"Base URL clients should use to reach this server (e.g. http://localhost:8080)",
+	)
+	flag.StringVar(
+		&cfg.basePath,
+		"base-path",
+		os.Getenv("MCP_BASE_PATH"),
+		"Base path prefix for SSE endpoints (e.g. /mcp)",
+	)
+	flag.StringVar(
+		&cfg.messageEndpoint,
+		"message-endpoint",
+		envOrDefault("MCP_MESSAGE_ENDPOINT", "/message"),
+		"HTTP path for the MCP message endpoint",
+	)
+	flag.StringVar(
+		&cfg.sseEndpoint,
+		"sse-endpoint",
+		envOrDefault("MCP_SSE_ENDPOINT", "/sse"),
+		"HTTP path for the SSE stream endpoint",
+	)
+
+	flag.Parse()
+
+	cfg.transport = strings.ToLower(strings.TrimSpace(cfg.transport))
+	cfg.httpAddr = strings.TrimSpace(cfg.httpAddr)
+	cfg.basePath = normalizeBasePath(cfg.basePath)
+	cfg.messageEndpoint = normalizeEndpoint(cfg.messageEndpoint, "/message")
+	cfg.sseEndpoint = normalizeEndpoint(cfg.sseEndpoint, "/sse")
+
+	if cfg.baseURL == "" {
+		cfg.baseURL = defaultBaseURL(cfg.httpAddr)
+	} else {
+		cfg.baseURL = strings.TrimRight(cfg.baseURL, "/")
+	}
+
+	return cfg
+}
+
+func startSSEServer(mcpServer *server.MCPServer, cfg serverConfig) error {
+	opts := []server.SSEOption{
+		server.WithBaseURL(cfg.baseURL),
+		server.WithBasePath(cfg.basePath),
+		server.WithMessageEndpoint(cfg.messageEndpoint),
+		server.WithSSEEndpoint(cfg.sseEndpoint),
+	}
+
+	sseServer := server.NewSSEServer(mcpServer, opts...)
+
+	fmt.Printf(
+		"Starting SSE server on %s (SSE endpoint: %s, message endpoint: %s)\n",
+		cfg.httpAddr,
+		sseServer.CompleteSseEndpoint(),
+		sseServer.CompleteMessageEndpoint(),
+	)
+
+	return sseServer.Start(cfg.httpAddr)
+}
+
 func main() {
+	cfg := loadServerConfig()
 	// Initialize the Prism client only if environment variables are available
 	initializeFromEnvIfAvailable()
 
@@ -374,7 +535,14 @@ func main() {
 	}
 
 	// Start the server
-	if err := server.ServeStdio(s); err != nil {
-		fmt.Printf("Server error: %v\n", err)
+	switch cfg.transport {
+	case "sse":
+		if err := startSSEServer(s, cfg); err != nil {
+			fmt.Printf("Server error: %v\n", err)
+		}
+	default:
+		if err := server.ServeStdio(s); err != nil {
+			fmt.Printf("Server error: %v\n", err)
+		}
 	}
 }
